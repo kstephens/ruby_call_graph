@@ -1,0 +1,5 @@
+#!/usr/bin/env ruby
+# -*- ruby -*-
+$: << File.expand_path("../../lib", __FILE__)
+require 'ruby_call_graph/generator'
+RubyCallGraph::Generator.new.parse_args!.run!
