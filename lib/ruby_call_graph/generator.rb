@@ -1,6 +1,12 @@
 require 'ruby_call_graph'
 require 'pp'
-require 'rubygems'
+
+if ENV['RUBY_CALL_GRAPH_DEBUGGER']
+  require 'rubygems'
+  gem 'ruby-debug'
+  require 'ruby-debug'
+  $debugger = true
+end
 
 class ::Object
   def to_const_str
@@ -89,7 +95,7 @@ module RubyCallGraph
         #$stderr.write i; $stderr.write -:|; $stderr.puts rcvr_file_line
 
         if ! meth.empty? and cls != FALSE_str
-          cls_meth  = "#{cls}\##{meth}".to_sym
+          cls_meth  = "#{cls} #{meth}".to_sym
           file_line = "#{file}:#{line}".to_sym
           clrs.map!{|clr| clr.split(':in `').first.to_sym}
           if event == C_CALL_str
@@ -99,25 +105,30 @@ module RubyCallGraph
           end
 
           case event
+=begin
+          when C_CALL_str
+            # Save the class#method for this line number.
+            file_line_to_cls_meth[rcvr] = 
+              file_line_to_cls_meth[file_line] ||= rcvr
+=end
           when CALL_str, LINE_str, RETURN_str
             # Save the class#method for this line number.
-            file_line_to_cls_meth[file_line] ||= cls_meth
-            file_line_to_cls_meth[cls_meth] = cls_meth
+            file_line_to_cls_meth[cls_meth] = 
+              file_line_to_cls_meth[file_line] ||= cls_meth
           end
 
           case event
           when C_CALL_str, CALL_str
-            x = [ sndr_stack.dup, rcvr ]
-            debugger if $debugger
+            x = [ sndr_stack.reverse, rcvr ]
             sndr_rcvrs << x
             $stderr.write "*#{n_processed}" if n_processed % 100 == 0
             n_processed += 1
           end
 
           case event
-          when C_CALL_str, CALL_str
+          when CALL_str, C_CALL_str
             sndr_stack.push rcvr
-          when C_RETURN_str, RETURN_str
+          when RETURN_str, C_RETURN_str
             sndr_stack.pop
           end
 
@@ -141,7 +152,7 @@ module RubyCallGraph
         else
           Proc.new { false }
         end
-      self.filter = Proc.new { | x | x = x.to_s; include_proc.call(x) && ! exclude_proc.call(x) }
+      self.filter = Proc.new { | x | x = x.to_const_str; include_proc.call(x) && ! exclude_proc.call(x) }
 
       # Convert each:
       #   [ [ file:line , ...], Class#method rcvr ]
@@ -153,30 +164,30 @@ module RubyCallGraph
       sndr_rcvrs.each do | x |
         sndrs, rcvr = *x
         # Convert all sender file:line to class#method.
-        sndrs.map!{ | sndr | file_line_to_cls_meth[sndr] || :MAIN }
+        rcvr = file_line_to_cls_meth[rcvr] || rcvr
+
+        # Ignore sndrs without matching rcvr.
+        # $stderr.puts rcvr.inspect
+        next unless filter.call(rcvr.to_const_str)
+ 
+        debugger if $debugger && rcvr.to_const_str == 'B bar'
+        sndrs.map!{ | sndr | file_line_to_cls_meth[sndr] || sndr }
+        debugger if $debugger && sndrs.include?(:'Range each')
+        sndrs = [ :'*MAIN*' ] if sndrs.empty?
         # Find first sender in the stack trace that matches the filter.
         sndr = sndrs.find do | sndr |
           sndr = sndr.to_const_str
           filter.call(sndr.to_const_str)
         end
-
-        # Ignore senders with no matching rcvr.
+        # Ignore rcvrs without matching sndr.
         next unless sndr
-        next unless filter.call(rcvr.to_const_str)
         $stderr.puts "#{sndr} -> #{rcvr}"
         # Keep track of each sndr -> rcvr as
         # sender[rcvr] = [ count ]
-        c = (cls_meth_sndr_rcvrs[sndr] ||= { })[rcvr] ||= [ 0 ]
-        c[0] += 1
+        c = (cls_meth_sndr_rcvrs[sndr] ||= { })[rcvr] ||= { :count => 0 }
+        c[:count] += 1
       end
       # pp(cls_meth_sndr_rcvrs)
-
-      # Convert to { sender Class#method => [ rcvr Class#method, ... ] }
-      h = { }
-      cls_meth_sndr_rcvrs.each do | sndr, rcvrs |
-        h[sndr] = rcvrs.keys
-      end
-      cls_meth_sndr_rcvrs = h
 
       # pp file_line_to_cls_meth
 
@@ -188,12 +199,18 @@ module RubyCallGraph
       end
 =end
 
+      # Convert to { sender Class#method => [ rcvr Class#method, ... ] }
+      h = { }
+      cls_meth_sndr_rcvrs.each do | sndr, rcvrs |
+        h[sndr] = rcvrs.keys
+      end
+
       # Get a list of methods for each class.
       cls_meths = { }
       meth_cls = { }
-      (cls_meth_sndr_rcvrs.keys + cls_meth_sndr_rcvrs.values).
+      (h.keys + h.values).
         flatten.uniq.each do | cls_meth |
-        cls, meth = *cls_meth.to_const_str.split('#', 2)
+        cls, meth = *cls_meth.to_const_str.split(' ', 2)
         # $stderr.puts "cls = #{cls.inspect} meth = #{meth.inspect}"
         cls = cls.nil? || cls.empty? ? nil : cls.to_sym
         meth = meth.nil? || meth.empty? ? nil : meth.to_sym
@@ -226,7 +243,7 @@ module RubyCallGraph
           cls_meth, meth = *meth
           cls_meth_s = cls_meth.to_const_str.inspect
           meth_s = meth.to_const_str.inspect
-          puts "    node [ shape=box, label=#{(cls.to_const_str + "\n#" + meth.to_const_str).inspect}, tooltip=#{cls_meth_s} ] #{cls_meth_s};"
+          puts %Q{    node [ shape=box, label=#{(cls.to_const_str + "\n" + meth.to_const_str).inspect}, tooltip=#{cls_meth_s} ] #{cls_meth_s};}
           # puts "    #{cls_s} -> #{cls_meth_s} [ style=dotted, arrowhead=none ];"
         end
         puts "  }"
@@ -234,10 +251,11 @@ module RubyCallGraph
       end
 
       cls_meth_sndr_rcvrs.each do | sndr, rcvrs |
-        rcvrs.each do | rcvr |
+        rcvrs.each do | rcvr, data |
+          $stderr.puts "#{sndr} -> #{rcvr} #{data.inspect}"
           n_interactions += 1
           tooltip = "#{sndr} -> #{rcvr}".inspect
-          puts "  #{sndr.to_const_str.inspect} -> #{rcvr.to_const_str.inspect} [ edgetooltip=#{tooltip} ];"
+          puts %Q{  #{sndr.to_const_str.inspect} -> #{rcvr.to_const_str.inspect} [ edgetooltip=#{tooltip}, label=#{data[:count]} ];}
           # puts "  #{sndr.to_const_str.inspect} -> #{meth_cls[rcvr].to_const_str.inspect} [ style=dotted, arrowhead=open, edgeURL="blank:", edgetooltip="#{tooltip"} ];"
         end
       end
