@@ -3,6 +3,16 @@ require 'ruby_call_graph'
 module RubyCallGraph
   class Collector
     attr_accessor :trace_file
+    attr_accessor :verbosity
+
+    def initialize opts = nil
+      @verbosity = 0
+      @opts = opts ||= { }
+      opts.each do | k, v |
+        s = :"#{k}="
+        send(s, v)
+      end
+    end
 
     def clear!
       File.unlink(trace_file) rescue nil
@@ -21,20 +31,21 @@ module RubyCallGraph
         @line_count += 1
         # end
       }
-      $stderr.puts "#{self}: logging to #{@trace_file.inspect}"
+      $stderr.puts "#{self}: logging to #{@trace_file.inspect}" if @verbosity >= 1
       self
     end
 
     def stop!
       set_trace_func @old_trace_func
       @old_trace_func = nil
-      $stderr.puts "#{self}: logged #{@line_count.inspect} events to #{@trace_file.inspect}"
+      $stderr.puts "#{self}: logged #{@line_count.inspect} events to #{@trace_file.inspect}" if @verbosity >= 1
       @trace_fh.close if @trace_fh
       @trace_fh = nil
       self
     end
 
     def capture!
+      raise ArgumentError "block not given" unless block_given?
       start!
       yield
     ensure

@@ -86,13 +86,11 @@ module RubyCallGraph
 
       sndr_stack = [ ]
       n_read = 0
-      n_processed = 0
+      progress = Progress.new(:lines).start!
       File.open(self.input) do | io |
         until io.eof?
           n_read += 1
-          if @verbosity >= 1
-            $stderr.write ".#{n_read}" if n_read % 100 == 0
-          end
+          progress.tick! if @verbosity >= 1
           record = io.readline
           record.chomp!
           event, file, line, meth, cls, cls_class, *clrs = record.split('|')
@@ -126,10 +124,6 @@ module RubyCallGraph
             when C_CALL_str, CALL_str
               x = [ sndr_stack.reverse, rcvr ]
               sndr_rcvrs << x
-              if @verbosity >= 1
-                $stderr.write "*#{n_processed}" if n_processed % 100 == 0
-              end
-              n_processed += 1
             end
 
             case event
@@ -143,6 +137,8 @@ module RubyCallGraph
           # puts "#{sndr_file_line.inspect} -> #{rcvr_file_line.inspect} #{cls_meth.inspect}"
         end
       end
+      n_calls = sndr_rcvrs.size
+      progress.complete!
 
       # Prepare filter for Class#method.
       include_proc =
@@ -168,8 +164,12 @@ module RubyCallGraph
       # and
       # Find first sender that matches the filter.
       cls_meth_sndr_rcvrs = { }
+      progress = Progress.new(:calls).start!
       sndr_rcvrs.each do | x |
         sndrs, rcvr = *x
+
+        progress.tick! if @verbosity >= 1
+
         # Convert all sender file:line to class#method.
         rcvr = file_line_to_cls_meth[rcvr] || rcvr
 
@@ -201,6 +201,7 @@ module RubyCallGraph
         c[:count] += 1
         c[call_type] += 1
       end
+      progress.complete!
       # pp(cls_meth_sndr_rcvrs)
 
       # pp file_line_to_cls_meth
@@ -236,7 +237,7 @@ module RubyCallGraph
       if @verbosity >= 1
         $stderr.puts "\n"
         $stderr.puts "Lines read: #{n_read}"
-        $stderr.puts "Lines processed: #{n_processed}"
+        $stderr.puts "Calls: #{n_calls}"
         $stderr.puts "File/line sites: #{file_line_to_cls_meth.size}"
         $stderr.puts "Unique Class#method senders: #{cls_meth_sndr_rcvrs.keys.size}"
       end
@@ -295,5 +296,33 @@ module RubyCallGraph
       end
     end # run!
 
+  end # class
+
+  class Progress
+    attr_accessor :name, :tick, :denomination, :factor
+    def initialize name
+      @name = name
+      @factor = 10
+    end
+    def start!
+      $stderr.write "#{name}:" if name
+      @tick = 0
+      @denomination = 1
+      self
+    end
+    def tick!
+      if (@tick += 1) % @denomination == 0
+        $stderr.write " #{@tick}"
+        if @tick / @denomination == @denomination
+          @denomination *= @factor
+        end
+        self
+      end
+    end
+    def complete!
+      $stderr.puts ": #{@tick} #{name}."
+      self
+    end
   end
-end
+
+end # module
