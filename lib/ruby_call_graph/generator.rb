@@ -53,6 +53,8 @@ module RubyCallGraph
           @include.push args.shift
         when '-e'
           @exclude.push args.shift
+        when '-ecore'
+          @exclude.push *CORE_PATTERNS
         when '--'
           @cmd = args.dup
           args.clear
@@ -62,6 +64,20 @@ module RubyCallGraph
       end
       self
     end
+    CORE_PATTERNS =
+      %w{
+      Object Kernel Class Module
+      Method UnboundMethod Proc
+      Comparable
+      NilClass TrueClass FalseClass
+      Numeric Integer Fixnum Bignum Float Rational Complex
+      String Symbol
+      Regexp MatchData
+      Enumerable Hash Array Range Set Queue
+      Date Time DateTime
+      IO
+      Thread ThreadGroup Mutex ConditionVariable
+      }.map{|x| "^#{x}( |::)"}.freeze
 
     def run!
       if @cmd
@@ -76,31 +92,36 @@ module RubyCallGraph
         raise "Cannot exec #{@cmd.inspect}"
       end
 
-      # Mapping of file:line to class#method
-      file_line_to_cls_meth = { }
-      cls_method_to_file_line_range = { }
-      file_line_sndr_rcvrs = { }
+      # Mapping of file:line to ClsMeth object.
+      obj_to_cls_meth = { }
 
+      # Stand-in for program top-level/main.
+      main = ClsMeth.new(:'-MAIN-', :'-MAIN-', :'-MAIN-')
+      obj_to_cls_meth[main.name] = main
+
+      # Output: [ sndr stack, rcvr ]
       sndr_rcvrs = [ ]
-      indent = { }
-
       sndr_stack = [ ]
+      indent = { }
       n_read = 0
-      progress = Progress.new(:lines).start!
+      sndr_stacks = { }
+      progress = Progress.new(:lines).start! if @verbosity >= 1
       File.open(self.input) do | io |
         until io.eof?
           n_read += 1
           progress.tick! if @verbosity >= 1
           record = io.readline
           record.chomp!
-          event, file, line, meth, cls, cls_class, *clrs = record.split('|')
+          event, file, line, meth, cls, cls_class, *rest = record.split('|')
           #i = indent[call_level] ||= (-:' ' * (call_level > 0 ? call_level : 0)).freeze
           #$stderr.write i; $stderr.write -:|; $stderr.puts rcvr_file_line
 
           if ! meth.empty? and cls != FALSE_str
-            cls_meth  = "#{cls} #{meth}".to_sym
-            file_line = "#{file}:#{line}".to_sym
-            clrs.map!{|clr| clr.split(':in `').first.to_sym}
+            name = :"#{cls} #{meth}"
+            cls_meth = obj_to_cls_meth[name] ||=
+              ClsMeth.new(name, cls.to_sym, meth.to_sym)
+
+            file_line = :"#{file}:#{line}"
             if event == C_CALL_str
               rcvr = cls_meth
             else
@@ -108,16 +129,9 @@ module RubyCallGraph
             end
 
             case event
-=begin
-            when C_CALL_str
-              # Save the class#method for this line number.
-              file_line_to_cls_meth[rcvr] = 
-                file_line_to_cls_meth[file_line] ||= rcvr
-=end
             when CALL_str, LINE_str, RETURN_str
               # Save the class#method for this line number.
-              file_line_to_cls_meth[cls_meth] = 
-                file_line_to_cls_meth[file_line] ||= cls_meth
+              obj_to_cls_meth[file_line] ||= cls_meth
             end
 
             case event
@@ -138,7 +152,20 @@ module RubyCallGraph
         end
       end
       n_calls = sndr_rcvrs.size
-      progress.complete!
+      progress.complete! if @verbosity >= 1
+
+=begin
+      # Uniquify sndrs.
+      sndrs = { }
+      sndr_rcvrs.each do | x |
+        x[0] = sndrs[x[0]] ||= x[0]
+      end
+=end
+
+      # Identity mapping of ClsMeths.
+      obj_to_cls_meth.values.each do | cls_meth |
+        obj_to_cls_meth[cls_meth] = cls_meth
+      end
 
       # Prepare filter for Class#method.
       include_proc =
@@ -146,7 +173,7 @@ module RubyCallGraph
           include_rx = Regexp.new(include.map{|x| "(#{x})"} * '|')
           Proc.new { | x | include_rx.match(x) }
         else
-          Proc.new { true }
+          Proc.new { false }
         end
       exclude_proc =
         unless exclude.empty?
@@ -155,7 +182,7 @@ module RubyCallGraph
         else
           Proc.new { false }
         end
-      self.filter = Proc.new { | x | x = x.to_const_str; include_proc.call(x) && ! exclude_proc.call(x) }
+      self.filter = Proc.new { | x | x = x.to_const_str; include_proc.call(x) || ! exclude_proc.call(x) }
 
       # Convert each:
       #   [ [ file:line , ...], Class#method rcvr ]
@@ -163,24 +190,21 @@ module RubyCallGraph
       #   [ [ Class#method senders, ... ], Class#method rcvr ]
       # and
       # Find first sender that matches the filter.
-      cls_meth_sndr_rcvrs = { }
-      progress = Progress.new(:calls).start!
+      cls_meth_sndr_rcvrs = Hash.new { | h, k | h[k] = { } }
+      progress = Progress.new(:calls).start! if @verbosity >= 1
       sndr_rcvrs.each do | x |
         sndrs, rcvr = *x
 
-        progress.tick! if @verbosity >= 1
-
         # Convert all sender file:line to class#method.
-        rcvr = file_line_to_cls_meth[rcvr] || rcvr
+        rcvr = obj_to_cls_meth[rcvr] || rcvr
 
         # Ignore sndrs without matching rcvr.
         # $stderr.puts rcvr.inspect
         next unless filter.call(rcvr.to_const_str)
 
-        debugger if $debugger && rcvr.to_const_str == 'B bar'
-        sndrs.map!{ | sndr | file_line_to_cls_meth[sndr] || sndr }
-        debugger if $debugger && sndrs.include?(:'Range each')
-        sndrs = [ :'-MAIN-' ] if sndrs.empty?
+        sndrs.map!{ | sndr | obj_to_cls_meth[sndr] || sndr }
+        sndrs = [ main ] if sndrs.empty?
+
         # Find first sender in the stack trace that matches the filter.
         call_type = :direct
         sndr = sndrs.find do | sndr |
@@ -192,27 +216,29 @@ module RubyCallGraph
             false
           end
         end
+
         # Ignore rcvrs without matching sndr.
         next unless sndr
-        $stderr.puts "#{sndr} -> #{rcvr}" if @verbosity >= 2
+
         # Keep track of each sndr -> rcvr as
         # sender[rcvr] = [ count ]
-        c = (cls_meth_sndr_rcvrs[sndr] ||= { })[rcvr] ||= { :count => 0, :direct => 0, :indirect => 0 }
-        c[:count] += 1
+        $stderr.puts "#{sndr} -> #{rcvr}" if @verbosity >= 2
+        progress.tick! if @verbosity >= 1
+        c = cls_meth_sndr_rcvrs[sndr][rcvr] ||= {
+          :sndr => sndr,
+          :rcvr => rcvr,
+          :all => 0,
+          :direct => 0,
+          :indirect => 0,
+        }
+        c[:all] += 1
         c[call_type] += 1
+        rcvr.calls!(call_type)
       end
-      progress.complete!
+      progress.complete! if @verbosity >= 1
       # pp(cls_meth_sndr_rcvrs)
 
       # pp file_line_to_cls_meth
-
-=begin
-      # Convert file:line senders to class#method senders.
-      file_line_sndr_rcvrs.each do | sndr, rcvrs |
-        sndr_cls_meth = file_line_to_cls_meth[sndr] || :'-MAIN-'
-        cls_meth_sndr_rcvrs[sndr_cls_meth] = rcvrs
-      end
-=end
 
       # Convert to { sender Class#method => [ rcvr Class#method, ... ] }
       h = { }
@@ -221,24 +247,17 @@ module RubyCallGraph
       end
 
       # Get a list of methods for each class.
-      cls_meths = { }
-      meth_cls = { }
+      cls_meths = Hash.new { | h, k | h[k] = [ ] }
       (h.keys + h.values).
         flatten.uniq.each do | cls_meth |
-        cls, meth = *cls_meth.to_const_str.split(' ', 2)
-        # $stderr.puts "cls = #{cls.inspect} meth = #{meth.inspect}"
-        cls = cls.nil? || cls.empty? ? nil : cls.to_sym
-        meth = meth.nil? || meth.empty? ? nil : meth.to_sym
-        (cls_meths[cls] ||= [ ]) << [ cls_meth, meth ]
-        meth_cls[meth] ||= cls
-        meth_cls[cls_meth] ||= cls
+        cls_meths[cls_meth.cls] << cls_meth
       end
 
       if @verbosity >= 1
         $stderr.puts "\n"
         $stderr.puts "Lines read: #{n_read}"
         $stderr.puts "Calls: #{n_calls}"
-        $stderr.puts "File/line sites: #{file_line_to_cls_meth.size}"
+        $stderr.puts "Class/methods created: #{ClsMeth.count}"
         $stderr.puts "Unique Class#method senders: #{cls_meth_sndr_rcvrs.keys.size}"
       end
       n_methods = 0
@@ -257,13 +276,11 @@ module RubyCallGraph
         puts "  subgraph #{cls_s} {"
         puts "    label=#{cls_s};"
         # puts "    node [ shape=box, style=dotted, label=#{cls_s}, tooltip=#{cls_s} ] #{cls_s};"
-        meths.each do | meth |
+        meths.each do | cls_meth |
           n_methods += 1
-          cls_meth, meth = *meth
           cls_meth_s = cls_meth.to_const_str.inspect
-          meth_s = meth.to_const_str.inspect
-          puts %Q{    node [ shape=box, label=#{(cls.to_const_str + "\n" + meth.to_const_str).inspect}, tooltip=#{cls_meth_s} ] #{cls_meth_s};}
-          # puts "    #{cls_s} -> #{cls_meth_s} [ style=dotted, arrowhead=none ];"
+          label = "#{cls_meth.cls}\n#{cls_meth.meth}\ncalls:#{cls_meth.calls[:all]},#{cls_meth.calls[:direct]},#{cls_meth.calls[:indirect]}".inspect
+          puts %Q{    node [ shape=box, label=#{label}, tooltip=#{cls_meth_s} ] #{cls_meth_s}; }
         end
         puts "  }"
         puts ""
@@ -276,14 +293,12 @@ module RubyCallGraph
       cls_meth_sndr_rcvrs.keys.sort_by{|k| k.to_const_str}.each do | sndr |
         rcvrs = cls_meth_sndr_rcvrs[sndr]
         rcvrs.keys.sort_by{|k| k.to_const_str}.each do | rcvr |
-          data = rcvrs[rcvr]
-          $stderr.puts "#{sndr} -> #{rcvr} #{data.inspect}" if @verbosity >= 2
+          $stderr.puts "#{sndr} -> #{rcvr} #{rcvr.calls.inspect}" if @verbosity >= 2
           [ :direct, :indirect ].each do | call_type |
-            if data[call_type] > 0
+            if (n = rcvr.calls[call_type]) > 0
               n_interactions += 1
-              tooltip = "#{sndr} -> #{rcvr} (#{call_type})"
-              puts %Q{  #{sndr.to_const_str.inspect} -> #{rcvr.to_const_str.inspect} [ style=#{edge_style[call_type]}, ededgetooltip=#{tooltip.inspect}, label=#{data[call_type]} ];}
-              # puts "  #{sndr.to_const_str.inspect} -> #{meth_cls[rcvr].to_const_str.inspect} [ style=dotted, arrowhead=open, edgeURL="blank:", edgetooltip="#{tooltip"} ];"
+              tooltip = "#{sndr} -> #{rcvr} #{call_type}:#{n}".inspect
+              puts %Q{  #{sndr.to_const_str.inspect} -> #{rcvr.to_const_str.inspect} [ style=#{edge_style[call_type]}, tooltip=#{tooltip}, labeltooltip=#{tooltip}, label=#{n.inspect} ]; }
             end
           end
         end
@@ -292,11 +307,35 @@ module RubyCallGraph
 
       if @verbosity >= 1
         $stderr.puts "Unique methods: #{n_methods}"
-        $stderr.puts "Unique methods/method interactions: #{n_interactions}"
+        $stderr.puts "Unique sender/receiver interactions: #{n_interactions}"
       end
     end # run!
 
   end # class
+
+  class ClsMeth
+    @@count = 0
+    def self.count; @@count; end
+    attr_accessor :cls, :meth, :name
+    attr_accessor :calls
+    def to_const_str
+      @name.to_const_str
+    end
+    alias :to_s :to_const_str
+    def initialize name, cls, meth
+      @@count += 1
+      @name = name
+      @cls  = cls
+      @meth = meth
+      @calls = { }
+      @calls.default = 0
+    end
+    def calls! call_type
+      @calls[:all] += 1
+      @calls[call_type] += 1
+      self
+    end
+  end
 
   class Progress
     attr_accessor :name, :tick, :denomination, :factor

@@ -5,4 +5,6 @@ module RubyCallGraph
   LINE_str = 'line'.freeze
   RETURN_str = 'return'.freeze
   FALSE_str = 'false'.freeze
+  SEP = '|'.freeze
+  SEP_NEWLINE = (SEP + "\n").freeze
 end

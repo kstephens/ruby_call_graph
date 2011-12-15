@@ -23,18 +23,34 @@ module RubyCallGraph
       @trace_file ||= "/tmp/ruby_call_graph.txt"
       @trace_fh = File.open(trace_file, "a+")
       @line_count ||= 0
+      this = self
       @old_trace_func =
       set_trace_func Proc.new() { | event, file, line, meth, binding, klass |
-        # if event == C_CALL == str or event == CALL_str or event == LINE_str or event == RETURN_str
-        clrs = caller[2 .. -1]
-        @trace_fh.puts "#{event}|#{file}|#{line}|#{meth}|#{klass}|#{klass.class.inspect}|#{clrs && clrs.join('|')}"
+        @trace_fh.write event
+        @trace_fh.write SEP
+        @trace_fh.write file
+        @trace_fh.write SEP
+        @trace_fh.write line
+        @trace_fh.write SEP
+        @trace_fh.write meth
+        @trace_fh.write SEP
+        @trace_fh.write this.class_name(klass)
+        @trace_fh.write SEP
+        @trace_fh.write this.class_name(klass.class)
+        # @trace_fh.write SEP
+        # @trace_fh.write this.class_name(binding.__self.class)
+        @trace_fh.write SEP_NEWLINE
         @line_count += 1
-        # end
       }
       $stderr.puts "#{self}: logging to #{@trace_file.inspect}" if @verbosity >= 1
       self
     end
-
+    def class_name cls
+      if cls && (x = cls.name).empty?
+        x = cls.inspect
+      end
+      x
+    end
     def stop!
       set_trace_func @old_trace_func
       @old_trace_func = nil
@@ -53,3 +69,17 @@ module RubyCallGraph
     end
   end
 end
+
+=begin
+class ::Binding
+  SELF = "self".freeze
+  def __self
+    unless @__self_ok
+      @__self_ok = true
+      @__self = eval(SELF, self)
+    end
+    @__self
+  end
+end
+=end
+
