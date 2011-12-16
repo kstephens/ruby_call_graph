@@ -11,7 +11,7 @@ Dir['example/ex*.rb'].each do | ex_rb |
     sh "bin/ruby_call_graph #{ex_log} -- #{ex_rb}"
   end
   [ [ "", "" ], 
-    [ "-ecore", "-exclude-core" ], 
+    [ "-exclude-core", "-ecore" ], 
     [ '-exclude-B-bar', "-e 'B bar'" ]
   ].each do | (name, opts) |
     ex_dot = "#{ex_log}#{name}.dot"
