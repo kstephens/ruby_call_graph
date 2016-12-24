@@ -15,8 +15,15 @@ class ::Object
 end
 
 class ::Symbol
-  def to_const_str
-    @to_const_str ||= to_s.freeze
+  if true
+    TO_CONST_STR = { }
+    def to_const_str
+      TO_CONST_STR[self] ||= to_s.freeze
+    end
+  else # OLD CRUBY
+    def to_const_str
+      @to_const_str ||= to_s.freeze
+    end
   end
   alias :-@ :to_const_str
 end
